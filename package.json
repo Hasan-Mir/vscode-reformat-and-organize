@@ -1,0 +1,156 @@
+{
+    "name": "reformat-and-organize",
+    "displayName": "Reformat & Organize",
+    "description": "Organize imports and format files from the VS Code Explorer. Reformat code for files, folders, multi-selections, Git changed files, or open files in the background.",
+    "version": "1.0.0",
+    "publisher": "SeyMi",
+    "license": "MIT",
+    "engines": {
+        "vscode": "^1.85.0"
+    },
+    "author": {
+        "name": "SeyMi"
+    },
+    "maintainers": [
+        "SeyMi"
+    ],
+    "categories": [
+        "Formatters",
+        "Other"
+    ],
+    "icon": "media/icon.png",
+    "main": "./out/extension.js",
+    "activationEvents": [
+        "onCommand:reformatAndOrganize.reformatCode",
+        "onCommand:reformatAndOrganize.organizeImports"
+    ],
+    "contributes": {
+        "commands": [
+            {
+                "command": "reformatAndOrganize.reformatCode",
+                "title": "Reformat Code…",
+                "category": "Reformat & Organize",
+                "icon": {
+                    "light": "media/reformat-light.svg",
+                    "dark": "media/reformat-dark.svg"
+                }
+            },
+            {
+                "command": "reformatAndOrganize.organizeImports",
+                "title": "Organize Imports…",
+                "category": "Reformat & Organize",
+                "icon": {
+                    "light": "media/imports-light.svg",
+                    "dark": "media/imports-dark.svg"
+                }
+            }
+        ],
+        "menus": {
+            "explorer/context": [
+                {
+                    "command": "reformatAndOrganize.reformatCode",
+                    "group": "7_modification@100"
+                },
+                {
+                    "command": "reformatAndOrganize.organizeImports",
+                    "group": "7_modification@101"
+                }
+            ],
+            "editor/context": [
+                {
+                    "command": "reformatAndOrganize.reformatCode",
+                    "group": "1_modification@100"
+                },
+                {
+                    "command": "reformatAndOrganize.organizeImports",
+                    "group": "1_modification@101"
+                }
+            ]
+        },
+        "configuration": {
+            "title": "Reformat & Organize",
+            "properties": {
+                "reformatAndOrganize.include": {
+                    "type": "string",
+                    "default": "*.ts, *.tsx, *.js, *.jsx, *.mjs, *.cjs, *.vue, *.json, *.jsonc, *.css, *.scss, *.less, *.html",
+                    "markdownDescription": "Default **file mask(s)** used by the scope dialog (comma-separated, WebStorm style). Supports `*`, `?` and `**`. A mask containing `/` is matched against the workspace-relative path; otherwise against the file name. Leave empty to include every file."
+                },
+                "reformatAndOrganize.exclude": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [
+                        "**/node_modules/**",
+                        "**/.git/**",
+                        "**/dist/**",
+                        "**/out/**",
+                        "**/build/**",
+                        "**/coverage/**",
+                        "**/.next/**",
+                        "**/*.min.*"
+                    ],
+                    "markdownDescription": "Glob patterns that are always skipped, even when a folder is right-clicked directly."
+                },
+                "reformatAndOrganize.showDialog": {
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Show the WebStorm-like scope dialog (options + file mask) before running. When disabled, the commands run immediately using `#orgfmt.include#`, `#orgfmt.exclude#` and `#orgfmt.organizeImportsDuringFormat#`."
+                },
+                "reformatAndOrganize.organizeImportsDuringFormat": {
+                    "type": "boolean",
+                    "default": false,
+                    "markdownDescription": "Default state of the **Optimize imports** checkbox in the *Format Files Here* dialog (like WebStorm's Reformat Code dialog). The two commands stay separate; this only lets formatting *optionally* organize imports too."
+                },
+                "reformatAndOrganize.saveAfterEdit": {
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Save each file after it has been processed in the background. When disabled, changed files are left dirty (open in memory) so you can review them."
+                }
+            }
+        }
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/Hasan-Mir/vscode-reformat-and-organize"
+    },
+    "bugs": {
+        "url": "https://github.com/Hasan-Mir/vscode-reformat-and-organize/issues"
+    },
+    "scripts": {
+        "build": "tsc -p ./",
+        "package": "npm run build && vsce package",
+        "checktype": "tsc --noEmit",
+        "test": "tsc -p ./ && node --test \"out/test/**/*.test.js\""
+    },
+    "devDependencies": {
+        "@types/vscode": "^1.85.0",
+        "@types/node": "^24.x",
+        "typescript": "^5.x",
+        "@vscode/vsce": "^3.x"
+    },
+    "keywords": [
+        "reformat and organize",
+        "organize imports and format files",
+        "organize imports",
+        "format files",
+        "reformat code",
+        "optimize imports",
+        "format folder",
+        "folder formatter",
+        "bulk format",
+        "batch formatting",
+        "background formatting",
+        "changed files",
+        "git changed files",
+        "open files",
+        "explorer context menu",
+        "webstorm",
+        "webstorm reformat code",
+        "typescript imports",
+        "javascript imports",
+        "prettier",
+        "eslint",
+        "code actions"
+    ]
+}
