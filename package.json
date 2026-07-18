@@ -28,21 +28,13 @@
         "commands": [
             {
                 "command": "reformatAndOrganize.reformatCode",
-                "title": "Reformat Code…",
-                "category": "Reformat & Organize",
-                "icon": {
-                    "light": "media/reformat-light.svg",
-                    "dark": "media/reformat-dark.svg"
-                }
+                "title": "📐 Reformat Code…",
+                "category": "Reformat & Organize"
             },
             {
                 "command": "reformatAndOrganize.organizeImports",
-                "title": "Organize Imports…",
-                "category": "Reformat & Organize",
-                "icon": {
-                    "light": "media/imports-light.svg",
-                    "dark": "media/imports-dark.svg"
-                }
+                "title": "🧹 Organize Imports…",
+                "category": "Reformat & Organize"
             }
         ],
         "menus": {
