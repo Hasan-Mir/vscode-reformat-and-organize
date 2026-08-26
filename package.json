@@ -2,7 +2,7 @@
     "name": "reformat-and-organize",
     "displayName": "Reformat & Organize",
     "description": "Organize imports and format files from the VS Code Explorer. Reformat code for files, folders, multi-selections, Git changed files, or open files in the background.",
-    "version": "1.0.0",
+    "version": "1.2.0",
     "publisher": "SeyMi",
     "license": "MIT",
     "engines": {
@@ -20,10 +20,6 @@
     ],
     "icon": "media/icon.png",
     "main": "./out/extension.js",
-    "activationEvents": [
-        "onCommand:reformatAndOrganize.reformatCode",
-        "onCommand:reformatAndOrganize.organizeImports"
-    ],
     "contributes": {
         "commands": [
             {
@@ -56,6 +52,28 @@
                 {
                     "command": "reformatAndOrganize.organizeImports",
                     "group": "1_modification@101"
+                }
+            ],
+            "editor/title/context": [
+                {
+                    "command": "reformatAndOrganize.reformatCode",
+                    "group": "1_modification@100"
+                },
+                {
+                    "command": "reformatAndOrganize.organizeImports",
+                    "group": "1_modification@101"
+                }
+            ],
+            "view/item/context": [
+                {
+                    "command": "reformatAndOrganize.reformatCode",
+                    "when": "view == workbench.explorer.openEditorsView",
+                    "group": "7_modification@100"
+                },
+                {
+                    "command": "reformatAndOrganize.organizeImports",
+                    "when": "view == workbench.explorer.openEditorsView",
+                    "group": "7_modification@101"
                 }
             ]
         },
@@ -98,6 +116,12 @@
                     "type": "boolean",
                     "default": true,
                     "markdownDescription": "Save each file after it has been processed in the background. When disabled, changed files are left dirty (open in memory) so you can review them."
+                },
+                "reformatAndOrganize.organizeImportsTimeout": {
+                    "type": "number",
+                    "default": 0,
+                    "minimum": 0,
+                    "markdownDescription": "Maximum time in **milliseconds** to wait for the language server (tsserver) to load and analyze a background-opened file before running **Organize Imports** on it.\n\nBy default (`0`) the extension waits **as long as it takes** — the moment the server produces usable code actions, processing continues, no matter how big the project is.\n\nSet a positive value to cap the wait per file (useful if some files are outside any TypeScript project and would otherwise wait forever); the progress notification's cancel button always aborts the wait."
                 }
             }
         }
@@ -116,10 +140,10 @@
         "test": "tsc -p ./ && node --test \"out/test/**/*.test.js\""
     },
     "devDependencies": {
-        "@types/vscode": "^1.85.0",
         "@types/node": "^24.x",
-        "typescript": "^5.x",
-        "@vscode/vsce": "^3.x"
+        "@types/vscode": "1.85.0",
+        "@vscode/vsce": "^3.x",
+        "typescript": "^5.x"
     },
     "keywords": [
         "reformat and organize",

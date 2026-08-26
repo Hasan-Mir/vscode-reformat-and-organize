@@ -19,6 +19,9 @@ interface DialogResult {
 
 export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
+        // One shared output channel for the whole session (creating a new
+        // channel on every failing run leaked channels that were never disposed).
+        { dispose: () => void getSessionChannel().dispose() },
         vscode.commands.registerCommand(
             'reformatAndOrganize.reformatCode',
             (uri?: vscode.Uri, uris?: vscode.Uri[]) =>
@@ -34,7 +37,29 @@ export function activate(context: vscode.ExtensionContext): void {
 
 export function deactivate(): void {}
 
+const delay = (ms: number): Promise<void> => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+let sessionChannel: vscode.OutputChannel | undefined;
+
+/** Lazily-created, session-wide output channel (disposed on extension unload). */
+function getSessionChannel(): vscode.OutputChannel {
+    sessionChannel ??= vscode.window.createOutputChannel('Reformat & Organize');
+    return sessionChannel;
+}
+
 async function runEntry(kind: JobKind, uri?: vscode.Uri, uris?: vscode.Uri[]): Promise<void> {
+    try {
+        await runEntryInner(kind, uri, uris);
+    } catch (e) {
+        // A deleted target, an unreadable folder etc. used to bubble up as an
+        // unhandled rejection; surface it as a normal error message instead.
+        void vscode.window.showErrorMessage(
+            `Reformat & Organize failed: ${e instanceof Error ? e.message : String(e)}`
+        );
+    }
+}
+
+async function runEntryInner(kind: JobKind, uri?: vscode.Uri, uris?: vscode.Uri[]): Promise<void> {
     const cfg = vscode.workspace.getConfiguration('reformatAndOrganize');
 
     // Targets: multi-select in the Explorer, a single file/folder, the active
@@ -74,8 +99,9 @@ async function runEntry(kind: JobKind, uri?: vscode.Uri, uris?: vscode.Uri[]): P
         masks: parseMasks(cfg.get<string>('include', '')),
     };
 
+    // Import-only operations on a single file run immediately, like before.
     const shouldShowDialog =
-        cfg.get<boolean>('showDialog', true) && !(kind.organize && !kind.format && isSingleFile);
+        cfg.get<boolean>('showDialog', true) && !(!kind.format && isSingleFile);
     if (shouldShowDialog) {
         const fromDialog = await showScopeDialog(kind, scopeName, cfg);
         if (!fromDialog) return; // cancelled
@@ -89,7 +115,14 @@ async function runEntry(kind: JobKind, uri?: vscode.Uri, uris?: vscode.Uri[]): P
         return;
     }
 
-    await processFiles(files, job, cfg.get<boolean>('saveAfterEdit', true), scopeName);
+    await processFiles(
+        files,
+        job,
+        cfg.get<boolean>('saveAfterEdit', true),
+        scopeName,
+        getSessionChannel(),
+        cfg.get<number>('organizeImportsTimeout', 10000)
+    );
 }
 
 /**
@@ -184,19 +217,54 @@ async function collectFiles(
     }
 
     if (openOnly) {
-        const open = new Set(
-            vscode.workspace.textDocuments
-                .filter(d => d.uri.scheme === 'file' && !d.isClosed)
-                .map(d => normalizeFsPath(d.uri.fsPath))
-        );
+        const open = openDocumentPaths();
         files = files.filter(f => open.has(normalizeFsPath(f.fsPath)));
     }
 
     return files.sort((a, b) => a.fsPath.localeCompare(b.fsPath));
 }
 
+/**
+ * Normalized paths of every document currently open in this window.
+ *
+ * `vscode.workspace.textDocuments` alone is NOT reliable for "which files are
+ * open": it only contains documents whose text model is currently loaded in the
+ * extension host, so a tab that was never activated can be missing from it —
+ * which silently dropped files from the "Only open files" scope.
+ * `vscode.window.tabGroups.all` enumerates ALL open editor tabs regardless of
+ * whether their model is loaded; textDocuments is still unioned in as a
+ * safety net (it also covers dirty documents whose tab was closed).
+ */
+function openDocumentPaths(): Set<string> {
+    const paths = new Set<string>();
+
+    for (const doc of vscode.workspace.textDocuments) {
+        if (doc.uri.scheme === 'file') paths.add(normalizeFsPath(doc.uri.fsPath));
+    }
+    for (const group of vscode.window.tabGroups.all) {
+        for (const tab of group.tabs) {
+            const input = tab.input;
+            if (input instanceof vscode.TabInputText) {
+                if (input.uri.scheme === 'file') {
+                    paths.add(normalizeFsPath(input.uri.fsPath));
+                }
+            } else if (input instanceof vscode.TabInputTextDiff) {
+                // Diff editors show two versions; the "current" one is `modified`.
+                if (input.modified.scheme === 'file') {
+                    paths.add(normalizeFsPath(input.modified.fsPath));
+                }
+            }
+        }
+    }
+    return paths;
+}
+
 function normalizeFsPath(p: string): string {
-    return p.replace(/\\/g, '/');
+    // Windows (and UNC) paths are case-insensitive, and the drive-letter casing
+    // can differ between URIs from findFiles and URIs from open editors, so a
+    // plain string comparison would miss matches on Windows.
+    const normalized = p.replace(/\\/g, '/');
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
 /** Absolute paths of all git-changed files in the repos of the given targets. */
@@ -229,9 +297,11 @@ async function processFiles(
     files: vscode.Uri[],
     job: DialogResult,
     saveAfterEdit: boolean,
-    scopeName: string
+    scopeName: string,
+    channel: vscode.OutputChannel,
+    organizeTimeoutMs: number
 ): Promise<void> {
-    const verb = [job.format ? 'Reformatting' : '', job.organize ? 'Organizing imports' : '']
+    const verb = [job.organize ? 'Organizing imports' : '', job.format ? 'Reformatting' : '']
         .filter(Boolean)
         .join(' + ');
     const errors: string[] = [];
@@ -252,7 +322,9 @@ async function processFiles(
                     // openTextDocument loads the file in the BACKGROUND — no editor
                     // tab is opened and nothing flashes on screen.
                     const doc = await vscode.workspace.openTextDocument(file);
-                    if (job.organize) await organizeImports(doc);
+                    if (job.organize && !token.isCancellationRequested) {
+                        await organizeImports(doc, organizeTimeoutMs, token);
+                    }
                     if (job.format) await formatDocument(doc);
                     if (saveAfterEdit && doc.isDirty) await doc.save();
                     processed++;
@@ -264,7 +336,6 @@ async function processFiles(
     );
 
     if (errors.length > 0) {
-        const channel = vscode.window.createOutputChannel('Reformat & Organize');
         for (const err of errors) channel.appendLine(err);
         channel.show(true);
         void vscode.window.showWarningMessage(
@@ -278,17 +349,135 @@ async function processFiles(
 }
 
 /** Run the "source.organizeImports" code action on a document, in the background. */
-async function organizeImports(doc: vscode.TextDocument): Promise<void> {
+async function organizeImports(
+    doc: vscode.TextDocument,
+    organizeTimeoutMs: number,
+    token: vscode.CancellationToken
+): Promise<void> {
+    await withLanguageServerRetries(doc, organizeTimeoutMs, token, async () =>
+        (await runSourceAction(doc, 'source.organizeImports')) === 'applied'
+            ? 'applied'
+            : 'retry'
+    );
+}
+
+/** Languages whose servers provide import actions — everything else gets a single attempt. */
+const RETRYABLE_LANGUAGE_IDS = new Set([
+    'typescript',
+    'javascript',
+    'typescriptreact',
+    'javascriptreact',
+]);
+
+/**
+ * Run `attempt` until it makes progress ('applied'), proves there is nothing
+ * to do ('done'), or the timeout elapses.
+ *
+ * Empty results ('retry') usually mean the language server hasn't finished
+ * loading the project yet, so they are retried — first while the document is
+ * invisible, and, after a handful of fruitless attempts, again with the
+ * document briefly surfaced in a preview tab: some language servers only
+ * produce code actions for documents they treat as active editors.
+ */
+async function withLanguageServerRetries(
+    doc: vscode.TextDocument,
+    timeoutMs: number,
+    token: vscode.CancellationToken,
+    attempt: () => Promise<'applied' | 'done' | 'retry'>
+): Promise<void> {
+    const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : Number.POSITIVE_INFINITY;
+    // A couple of invisible attempts first; then surface the document if the
+    // server still hasn't produced anything usable.
+    const maxInvisibleAttempts = RETRYABLE_LANGUAGE_IDS.has(doc.languageId) ? 6 : 1;
+
+    const runUntilDeadline = async (): Promise<void> => {
+        while (!token?.isCancellationRequested && Date.now() < deadline) {
+            const outcome = await attempt();
+            if (outcome !== 'retry') return;
+            await delay(400);
+        }
+    };
+
+    let attempts = 0;
+    while (
+        attempts < maxInvisibleAttempts &&
+        !token?.isCancellationRequested &&
+        Date.now() < deadline
+    ) {
+        attempts++;
+        const outcome = await attempt();
+        if (outcome !== 'retry') return;
+        await delay(400);
+    }
+
+    if (
+        token?.isCancellationRequested ||
+        !RETRYABLE_LANGUAGE_IDS.has(doc.languageId) ||
+        isDocumentVisible(doc) ||
+        Date.now() >= deadline
+    ) {
+        return;
+    }
+
+    // Surface briefly so the language server treats the document like a real
+    // editing session, then keep retrying until the deadline.
+    try {
+        await vscode.window.showTextDocument(doc, {
+            preview: true,
+            preserveFocus: true,
+            viewColumn: vscode.ViewColumn.Beside,
+        });
+        await runUntilDeadline();
+    } finally {
+        await closeCleanPreviewTab(doc);
+    }
+}
+
+function isDocumentVisible(doc: vscode.TextDocument): boolean {
+    return vscode.window.visibleTextEditors.some(e => e.document.uri.toString() === doc.uri.toString());
+}
+
+/** Close the preview tab showing `doc`, but only when it has no unsaved edits. */
+async function closeCleanPreviewTab(doc: vscode.TextDocument): Promise<void> {
+    try {
+        for (const group of vscode.window.tabGroups.all) {
+            for (const tab of group.tabs) {
+                const input = tab.input;
+                if (
+                    input instanceof vscode.TabInputText &&
+                    input.uri.toString() === doc.uri.toString() &&
+                    !doc.isDirty
+                ) {
+                    await vscode.window.tabGroups.close(tab);
+                    return;
+                }
+            }
+        }
+    } catch {
+        // Closing is best-effort; a leftover preview tab is harmless.
+    }
+}
+
+/** Apply the first available source action of `kind` to the whole document. */
+async function runSourceAction(
+    doc: vscode.TextDocument,
+    kind: string
+): Promise<'applied' | 'none'> {
     const lastLine = doc.lineAt(Math.max(0, doc.lineCount - 1));
     const fullRange = new vscode.Range(new vscode.Position(0, 0), lastLine.range.end);
-    const actions = await vscode.commands.executeCommand<any[]>(
+    const actions = await vscode.commands.executeCommand<vscode.CodeAction[]>(
         'vscode.executeCodeActionProvider',
         doc.uri,
         fullRange,
-        'source.organizeImports'
+        kind
     );
     const action = (actions ?? []).find(a => a && !a.disabled);
-    if (!action) return; // language has no organize-imports support — not an error
+    if (!action) return 'none'; // language has no such source action — not an error
+    await applyCodeAction(action);
+    return 'applied';
+}
+
+async function applyCodeAction(action: vscode.CodeAction): Promise<void> {
     if (action.edit) await vscode.workspace.applyEdit(action.edit);
     if (action.command) {
         await vscode.commands.executeCommand(
