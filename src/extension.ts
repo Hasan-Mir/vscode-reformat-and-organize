@@ -225,22 +225,21 @@ async function collectFiles(
 }
 
 /**
- * Normalized paths of every document currently open in this window.
+ * Normalized paths of every file currently open in an editor tab in this window.
  *
- * `vscode.workspace.textDocuments` alone is NOT reliable for "which files are
- * open": it only contains documents whose text model is currently loaded in the
- * extension host, so a tab that was never activated can be missing from it —
- * which silently dropped files from the "Only open files" scope.
- * `vscode.window.tabGroups.all` enumerates ALL open editor tabs regardless of
- * whether their model is loaded; textDocuments is still unioned in as a
- * safety net (it also covers dirty documents whose tab was closed).
+ * ⚠️ `vscode.workspace.textDocuments` must NOT be used here: it contains every
+ * document whose text model is merely LOADED IN MEMORY — including files
+ * background-loaded by this very extension (or other ones) in earlier runs,
+ * which have no tab at all. Including them silently processed files the user
+ * never opened, breaking the "Only open files" scope.
+ *
+ * `vscode.window.tabGroups.all` enumerates exactly what the Open Editors view
+ * shows, i.e. what a user perceives as "open", so it is the single source of
+ * truth for this filter.
  */
 function openDocumentPaths(): Set<string> {
     const paths = new Set<string>();
 
-    for (const doc of vscode.workspace.textDocuments) {
-        if (doc.uri.scheme === 'file') paths.add(normalizeFsPath(doc.uri.fsPath));
-    }
     for (const group of vscode.window.tabGroups.all) {
         for (const tab of group.tabs) {
             const input = tab.input;
@@ -355,9 +354,7 @@ async function organizeImports(
     token: vscode.CancellationToken
 ): Promise<void> {
     await withLanguageServerRetries(doc, organizeTimeoutMs, token, async () =>
-        (await runSourceAction(doc, 'source.organizeImports')) === 'applied'
-            ? 'applied'
-            : 'retry'
+        (await runSourceAction(doc, 'source.organizeImports')) === 'applied' ? 'applied' : 'retry'
     );
 }
 
@@ -434,7 +431,9 @@ async function withLanguageServerRetries(
 }
 
 function isDocumentVisible(doc: vscode.TextDocument): boolean {
-    return vscode.window.visibleTextEditors.some(e => e.document.uri.toString() === doc.uri.toString());
+    return vscode.window.visibleTextEditors.some(
+        e => e.document.uri.toString() === doc.uri.toString()
+    );
 }
 
 /** Close the preview tab showing `doc`, but only when it has no unsaved edits. */
