@@ -1,6 +1,6 @@
 # 🔄 Reformat & Organize
 
-> **Organize Imports, Add Missing Imports & Format Files** directly from the VS Code Explorer or editor tabs. ✨
+> **Organize Imports & Format Files** directly from the VS Code Explorer or editor tabs. ✨
 
 Process a file, folder, editor tab, or any multi-selection in the background—without opening every file in an editor tab.
 
@@ -53,11 +53,11 @@ When **Only changed files** and **Only open files** are enabled together, a docu
 
 Use WebStorm-style masks to limit which files are processed:
 
-_.ts,_ .tsx
-
-src//\*.js
-
-_.vue;_ .json
+```text
+*.ts, *.tsx
+src/**/*.js
+*.vue; *.json
+```
 
 Supported patterns:
 
@@ -87,4 +87,16 @@ Right-click a file, folder, editor tab, or any selection (Explorer / Open Editor
 ## ⚙️ Requirements
 
 - **VS Code 1.85.0 or newer** — the extension only relies on long-stable APIs (`window.tabGroups` requires VS Code 1.67+), so it works on the current release as well as many older versions.
-- **`reformatAndOrganize.organizeImportsTimeout`** *(number, ms, default `0`)* — by default Organize Imports waits **as long as it takes** for the language server to load & analyze a file. Set a positive value (ms) to cap the wait per file; the progress notification's cancel button always aborts.
+
+## 🔧 Configuration
+
+All settings live under the `reformatAndOrganize.` prefix:
+
+| Setting | Type | Default | Description |
+| --- | --- | --- | --- |
+| `include` | string | `*.ts, *.tsx, *.js, *.jsx, *.mjs, *.cjs, *.vue, *.json, *.jsonc, *.css, *.scss, *.less, *.html` | Default file mask(s) used by the scope dialog (comma-separated, WebStorm style). Supports `*`, `?` and `**`. |
+| `exclude` | array | `**/node_modules/**`, `**/.git/**`, `**/dist/**`, `**/out/**`, `**/build/**`, `**/coverage/**`, `**/.next/**`, `**/*.min.*` | Glob patterns that are always skipped, even when a folder is right-clicked directly. |
+| `showDialog` | boolean | `true` | Show the WebStorm-like scope dialog (options + file mask) before running. |
+| `organizeImportsDuringFormat` | boolean | `false` | Default state of the **Optimize imports** checkbox in the dialog. |
+| `saveAfterEdit` | boolean | `true` | Save each file after it has been processed in the background. When disabled, changed files are left dirty so you can review them. |
+| `organizeImportsTimeout` | number | `0` | Maximum time in **milliseconds** to wait for the language server to load & analyze a background-opened file before running **Organize Imports**. By default (`0`) the extension waits **as long as it takes**; the progress notification's cancel button always aborts. |
