@@ -12,6 +12,8 @@ Process a file, folder, editor tab, or any multi-selection in the background—w
 - 🗂️ Right-click **editor tabs** (single or multi-selected) and process them directly
 - 🗃️ Multi-select files in the **Open Editors** view and process them
 - 🌿 Filter files using **Only changed files**
+- 📌 Filter files using **Only staged files**
+- 🌿 Filter files using **Only non-staged files**
 - 📖 Filter files using **Only open files**
 - 🔗 Optionally organize imports while running **Reformat Code**
 - 🎯 Filter the scope with WebStorm-style file masks
@@ -43,11 +45,25 @@ Processes only files reported as changed by Git, including:
 
 Deleted files are automatically skipped.
 
+### 📌 Only staged files
+
+Processes only files that are currently staged in the Git index (staged modifications, additions, copies, and renames). Unstaged and untracked changes are ignored.
+
+### 🌿 Only non-staged files
+
+Processes only files that have changes in the working tree that are not staged in the Git index, including:
+
+- Unstaged modifications
+- Files with both staged and unstaged changes
+- Untracked files
+
+Excludes staged-only files (e.g. `M ` or `A `) and deleted files because the extension cannot format them.
+
 ### 📖 Only open files
 
 Processes only documents currently open in the active VS Code window.
 
-When **Only changed files** and **Only open files** are enabled together, a document must match both filters to be processed.
+When **Only changed files**, **Only staged files**, **Only non-staged files**, and **Only open files** are enabled together, a document must match all active filters to be processed.
 
 ### 🎯 File masks
 
@@ -73,6 +89,8 @@ You can optionally:
 
 - Optimize imports before formatting
 - Process only Git-changed files
+- Process only Git-staged files
+- Process only non-staged files
 - Process only open files
 - Filter files using file masks
 

@@ -1,7 +1,7 @@
 import * as cp from 'node:child_process';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { parsePorcelainZ } from './core/git';
+import { parseNonStagedPorcelainZ, parsePorcelainZ, parseStagedPorcelainZ } from './core/git';
 import { isExcluded, matchesMasks, parseMasks } from './core/mask';
 
 interface JobKind {
@@ -13,6 +13,8 @@ interface DialogResult {
     organize: boolean;
     format: boolean;
     changedOnly: boolean;
+    stagedOnly: boolean;
+    nonStagedOnly: boolean;
     openOnly: boolean;
     masks: string[];
 }
@@ -24,13 +26,21 @@ export function activate(context: vscode.ExtensionContext): void {
         { dispose: () => void getSessionChannel().dispose() },
         vscode.commands.registerCommand(
             'reformatAndOrganize.reformatCode',
-            (uri?: vscode.Uri, uris?: vscode.Uri[]) =>
-                runEntry({ format: true, organize: false }, uri, uris)
+            (uri?: unknown, uris?: unknown) =>
+                runEntry({ format: true, organize: false }, uri, uris, false)
         ),
         vscode.commands.registerCommand(
             'reformatAndOrganize.organizeImports',
-            (uri?: vscode.Uri, uris?: vscode.Uri[]) =>
-                runEntry({ format: false, organize: true }, uri, uris)
+            (uri?: unknown, uris?: unknown) =>
+                runEntry({ format: false, organize: true }, uri, uris, false)
+        ),
+        vscode.commands.registerCommand(
+            'reformatAndOrganize.reformatCodeFromTab',
+            (uri?: unknown) => runEntry({ format: true, organize: false }, uri, undefined, true)
+        ),
+        vscode.commands.registerCommand(
+            'reformatAndOrganize.organizeImportsFromTab',
+            (uri?: unknown) => runEntry({ format: false, organize: true }, uri, undefined, true)
         )
     );
 }
@@ -46,10 +56,67 @@ function getSessionChannel(): vscode.OutputChannel {
     sessionChannel ??= vscode.window.createOutputChannel('Reformat & Organize');
     return sessionChannel;
 }
+/**
+ * Type-safe helpers for working with VS Code tabs.
+ */
 
-async function runEntry(kind: JobKind, uri?: vscode.Uri, uris?: vscode.Uri[]): Promise<void> {
+async function getMultiSelectedEditorTabUris(anchor: vscode.Uri): Promise<vscode.Uri[]> {
+    if (anchor.scheme !== 'file') {
+        return [];
+    }
+
+    const previousClipboard = await vscode.env.clipboard.readText();
+    const sentinel = `__reformat_and_organize_${Date.now()}_${Math.random()}__`;
+
     try {
-        await runEntryInner(kind, uri, uris);
+        await vscode.env.clipboard.writeText(sentinel);
+        await vscode.commands.executeCommand('copyFilePath', anchor);
+
+        const copied = await vscode.env.clipboard.readText();
+
+        if (copied === sentinel) {
+            return [];
+        }
+
+        const rawPaths = copied.split(/\r?\n/).filter(p => p.length > 0);
+
+        const pathsByNormalized = new Map<string, string>();
+        for (const rawPath of rawPaths) {
+            pathsByNormalized.set(normalizeFsPath(rawPath), rawPath);
+        }
+
+        const uniquePaths = [...pathsByNormalized.keys()];
+
+        if (uniquePaths.length <= 1) {
+            return [];
+        }
+
+        const anchorPath = normalizeFsPath(anchor.fsPath);
+
+        if (!uniquePaths.includes(anchorPath)) {
+            return [];
+        }
+
+        return [...pathsByNormalized.values()].map(p => vscode.Uri.file(p));
+    } catch {
+        return [];
+    } finally {
+        try {
+            await vscode.env.clipboard.writeText(previousClipboard);
+        } catch {
+            // Clipboard restoration is best-effort.
+        }
+    }
+}
+
+async function runEntry(
+    kind: JobKind,
+    uri?: unknown,
+    uris?: unknown,
+    fromEditorTab = false
+): Promise<void> {
+    try {
+        await runEntryInner(kind, uri, uris, fromEditorTab);
     } catch (e) {
         // A deleted target, an unreadable folder etc. used to bubble up as an
         // unhandled rejection; surface it as a normal error message instead.
@@ -59,14 +126,31 @@ async function runEntry(kind: JobKind, uri?: vscode.Uri, uris?: vscode.Uri[]): P
     }
 }
 
-async function runEntryInner(kind: JobKind, uri?: vscode.Uri, uris?: vscode.Uri[]): Promise<void> {
+async function runEntryInner(
+    kind: JobKind,
+    uri?: unknown,
+    uris?: unknown,
+    fromEditorTab = false
+): Promise<void> {
     const cfg = vscode.workspace.getConfiguration('reformatAndOrganize');
 
-    // Targets: multi-select in the Explorer, a single file/folder, the active
-    // editor's file, or the first workspace folder as a fallback.
-    let targets = (uris && uris.length > 0 ? uris : uri ? [uri] : []).filter(
-        u => u && u.scheme === 'file'
-    );
+    const explicitMulti = extractUris(uris);
+    const singleOrList = extractUris(uri);
+    let targets: vscode.Uri[] = [];
+
+    if (explicitMulti.length > 0) {
+        targets = explicitMulti;
+    } else if (singleOrList.length > 1) {
+        targets = singleOrList;
+    } else if (singleOrList.length === 1) {
+        if (fromEditorTab) {
+            const selectedTabs = await getMultiSelectedEditorTabUris(singleOrList[0]);
+            targets = selectedTabs.length > 1 ? selectedTabs : singleOrList;
+        } else {
+            targets = singleOrList;
+        }
+    }
+
     if (targets.length === 0 && vscode.window.activeTextEditor) {
         targets = [vscode.window.activeTextEditor.document.uri];
     }
@@ -80,6 +164,8 @@ async function runEntryInner(kind: JobKind, uri?: vscode.Uri, uris?: vscode.Uri[
         }
         targets = [folders[0].uri];
     }
+
+    targets = deduplicateUris(targets);
 
     const stats = await Promise.all(targets.map(target => vscode.workspace.fs.stat(target)));
     const isSingleFile = targets.length === 1 && (stats[0].type & vscode.FileType.Directory) === 0;
@@ -95,6 +181,8 @@ async function runEntryInner(kind: JobKind, uri?: vscode.Uri, uris?: vscode.Uri[
             kind.organize ||
             (kind.format && cfg.get<boolean>('organizeImportsDuringFormat', false)),
         changedOnly: false,
+        stagedOnly: false,
+        nonStagedOnly: false,
         openOnly: false,
         masks: parseMasks(cfg.get<string>('include', '')),
     };
@@ -104,12 +192,22 @@ async function runEntryInner(kind: JobKind, uri?: vscode.Uri, uris?: vscode.Uri[
         cfg.get<boolean>('showDialog', true) && !(!kind.format && isSingleFile);
     if (shouldShowDialog) {
         const fromDialog = await showScopeDialog(kind, scopeName, cfg);
-        if (!fromDialog) return; // cancelled
+        if (!fromDialog) {
+            return;
+        }
         job = fromDialog;
     }
 
     const excludes = cfg.get<string[]>('exclude', []);
-    const files = await collectFiles(targets, job.masks, excludes, job.changedOnly, job.openOnly);
+    const files = await collectFiles(
+        targets,
+        job.masks,
+        excludes,
+        job.changedOnly,
+        job.stagedOnly,
+        job.nonStagedOnly,
+        job.openOnly
+    );
     if (files.length === 0) {
         void vscode.window.showInformationMessage(`No matching files found in ${scopeName}.`);
         return;
@@ -127,8 +225,7 @@ async function runEntryInner(kind: JobKind, uri?: vscode.Uri, uris?: vscode.Uri[
 
 /**
  * WebStorm-like scope dialog:
- *  step 1 — checkboxes (Optimize imports / Only changed files / Only open files), like the
- *           checkboxes in WebStorm's "Reformat Code" dialog;
+ *  step 1 — checkboxes (Optimize imports / Only changed files / Only staged files / Only open files);
  *  step 2 — file mask input, like WebStorm's "Filters" scope.
  */
 async function showScopeDialog(
@@ -138,6 +235,8 @@ async function showScopeDialog(
 ): Promise<DialogResult | undefined> {
     const OPTIMIZE = '$(references) Optimize imports';
     const CHANGED = '$(git-branch) Only changed files';
+    const STAGED = '$(git-commit) Only staged files';
+    const NON_STAGED = '$(git-branch) Only non-staged files';
     const OPEN = '$(files) Only open files';
 
     const items: vscode.QuickPickItem[] = [];
@@ -154,6 +253,16 @@ async function showScopeDialog(
         picked: false,
     });
     items.push({
+        label: STAGED,
+        detail: 'Only process files staged for commit in Git (index).',
+        picked: false,
+    });
+    items.push({
+        label: NON_STAGED,
+        detail: 'Only process files with changes that are not staged in the Git index, including untracked files.',
+        picked: false,
+    });
+    items.push({
         label: OPEN,
         detail: 'Only process files already open in this VS Code window.',
         picked: false,
@@ -165,7 +274,9 @@ async function showScopeDialog(
         canPickMany: true,
         ignoreFocusOut: true,
     })) as vscode.QuickPickItem[] | undefined;
-    if (!picked) return undefined;
+    if (!picked) {
+        return undefined;
+    }
 
     const mask = await vscode.window.showInputBox({
         title: `File mask(s) — ${scopeName}`,
@@ -173,12 +284,16 @@ async function showScopeDialog(
         value: cfg.get<string>('include', ''),
         ignoreFocusOut: true,
     });
-    if (mask === undefined) return undefined; // cancelled
+    if (mask === undefined) {
+        return undefined;
+    }
 
     return {
         format: kind.format,
         organize: kind.organize || picked.some(p => p.label === OPTIMIZE),
         changedOnly: picked.some(p => p.label === CHANGED),
+        stagedOnly: picked.some(p => p.label === STAGED),
+        nonStagedOnly: picked.some(p => p.label === NON_STAGED),
         openOnly: picked.some(p => p.label === OPEN),
         masks: parseMasks(mask),
     };
@@ -189,6 +304,8 @@ async function collectFiles(
     masks: string[],
     excludes: string[],
     changedOnly: boolean,
+    stagedOnly: boolean,
+    nonStagedOnly: boolean,
     openOnly: boolean
 ): Promise<vscode.Uri[]> {
     const byPath = new Map<string, vscode.Uri>();
@@ -214,6 +331,16 @@ async function collectFiles(
     if (changedOnly) {
         const changed = await gitChangedFiles(targets);
         files = files.filter(f => changed.has(normalizeFsPath(f.fsPath)));
+    }
+
+    if (stagedOnly) {
+        const staged = await gitStagedFiles(targets);
+        files = files.filter(f => staged.has(normalizeFsPath(f.fsPath)));
+    }
+
+    if (nonStagedOnly) {
+        const nonStaged = await gitNonStagedFiles(targets);
+        files = files.filter(f => nonStaged.has(normalizeFsPath(f.fsPath)));
     }
 
     if (openOnly) {
@@ -290,6 +417,177 @@ async function gitChangedFiles(targets: vscode.Uri[]): Promise<Set<string>> {
         }
     }
     return changed;
+}
+
+/** Absolute paths of all git-staged files in the repos of the given targets. */
+async function gitStagedFiles(targets: vscode.Uri[]): Promise<Set<string>> {
+    const roots = new Set<string>();
+    for (const t of targets) {
+        const folder =
+            vscode.workspace.getWorkspaceFolder(t) ?? vscode.workspace.workspaceFolders?.[0];
+        if (folder) {
+            roots.add(folder.uri.fsPath);
+        }
+    }
+
+    const staged = new Set<string>();
+    for (const root of roots) {
+        const output = await new Promise<string>(resolve => {
+            cp.execFile(
+                'git',
+                ['-C', root, 'status', '--porcelain=v1', '-z'],
+                { maxBuffer: 64 * 1024 * 1024 },
+                (error, stdout) => resolve(error ? '' : stdout)
+            );
+        });
+        for (const rel of parseStagedPorcelainZ(output)) {
+            staged.add(normalizeFsPath(path.join(root, rel)));
+        }
+    }
+    return staged;
+}
+
+/** Absolute paths of all files with non-staged Git changes in the repos of the given targets. */
+async function gitNonStagedFiles(targets: vscode.Uri[]): Promise<Set<string>> {
+    const roots = new Set<string>();
+
+    for (const t of targets) {
+        const folder =
+            vscode.workspace.getWorkspaceFolder(t) ?? vscode.workspace.workspaceFolders?.[0];
+
+        if (folder) {
+            roots.add(folder.uri.fsPath);
+        }
+    }
+
+    const nonStaged = new Set<string>();
+
+    for (const root of roots) {
+        const output = await new Promise<string>(resolve => {
+            cp.execFile(
+                'git',
+                ['-C', root, 'status', '--porcelain=v1', '-z'],
+                { maxBuffer: 64 * 1024 * 1024 },
+                (error, stdout) => resolve(error ? '' : stdout)
+            );
+        });
+
+        for (const rel of parseNonStagedPorcelainZ(output)) {
+            nonStaged.add(normalizeFsPath(path.join(root, rel)));
+        }
+    }
+
+    return nonStaged;
+}
+
+function extractUri(item: unknown): vscode.Uri | undefined {
+    if (!item || typeof item !== 'object') {
+        if (item instanceof vscode.Uri) {
+            return item;
+        }
+        return undefined;
+    }
+
+    if (item instanceof vscode.Uri) {
+        return item;
+    }
+
+    const obj = item as Record<string, unknown>;
+
+    // Handle context menu tab object: { group: ..., tab: ... }
+    if ('tab' in obj && typeof obj.tab === 'object' && obj.tab !== null) {
+        return extractUri(obj.tab);
+    }
+
+    if ('resourceUri' in obj && obj.resourceUri instanceof vscode.Uri) {
+        return obj.resourceUri;
+    }
+
+    if ('uri' in obj && obj.uri instanceof vscode.Uri) {
+        return obj.uri;
+    }
+
+    if ('input' in obj) {
+        return getTabUriFromInput(obj.input);
+    }
+
+    return undefined;
+}
+
+function getTabUriFromInput(input: unknown): vscode.Uri | undefined {
+    if (input instanceof vscode.TabInputText) {
+        return input.uri;
+    }
+    if (input instanceof vscode.TabInputTextDiff) {
+        return input.modified;
+    }
+    if (typeof input === 'object' && input !== null) {
+        if ('uri' in input) {
+            const candidate = (input as Record<string, unknown>).uri;
+            if (candidate instanceof vscode.Uri) {
+                return candidate;
+            }
+        }
+        if ('modified' in input) {
+            const candidate = (input as Record<string, unknown>).modified;
+            if (candidate instanceof vscode.Uri) {
+                return candidate;
+            }
+        }
+    }
+    return undefined;
+}
+
+function extractUris(arg: unknown): vscode.Uri[] {
+    if (!arg) {
+        return [];
+    }
+
+    // VS Code sometimes passes an object containing an array of selected items: { uris: [...] } or { tabs: [...] }
+    if (
+        typeof arg === 'object' &&
+        arg !== null &&
+        !Array.isArray(arg) &&
+        !(arg instanceof vscode.Uri)
+    ) {
+        const obj = arg as Record<string, unknown>;
+        if (Array.isArray(obj.uris)) {
+            return extractUris(obj.uris);
+        }
+        if (Array.isArray(obj.tabs)) {
+            return extractUris(obj.tabs);
+        }
+    }
+
+    if (Array.isArray(arg)) {
+        const uris: vscode.Uri[] = [];
+        for (const item of arg) {
+            const u = extractUri(item);
+            if (u && u.scheme === 'file') {
+                uris.push(u);
+            }
+        }
+        return uris;
+    }
+
+    const single = extractUri(arg);
+    if (single && single.scheme === 'file') {
+        return [single];
+    }
+    return [];
+}
+
+function deduplicateUris(uris: vscode.Uri[]): vscode.Uri[] {
+    const seen = new Set<string>();
+    const result: vscode.Uri[] = [];
+    for (const u of uris) {
+        const key = normalizeFsPath(u.fsPath);
+        if (!seen.has(key)) {
+            seen.add(key);
+            result.push(u);
+        }
+    }
+    return result;
 }
 
 async function processFiles(
